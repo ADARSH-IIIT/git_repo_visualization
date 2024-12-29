@@ -1,0 +1,425 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as d3 from 'd3';
+import './TreeVisualization.css';
+import { useParams } from 'react-router-dom';
+import FunnyLoader from './loader';
+
+const TreeVisualization = () => {
+  const treeRef = useRef(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const {owner, repo, branch} = useParams();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const nodePositions = useRef(new Map()); // Store custom positions
+
+  const fetchData = async () => {
+    try {
+      const baseUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+      const headers = {
+        'Accept': 'application/vnd.github.v3+json'
+      };
+      const response = await fetch(baseUrl, { headers });
+      
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      const result = await response.json();
+      setData({"tree": result.tree});
+      setLoading(false);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  useEffect(() => {
+    if (!treeRef.current) return;
+
+    // Clear existing SVG
+    d3.select(treeRef.current).selectAll("*").remove();
+
+    // Set dimensions
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const margin = { top: 60, right: 120, bottom: 60, left: 120 };
+
+    // Process data function
+    const processGitHubData = (data) => {
+      const root = {
+        name: repo,
+        children: []
+      };
+
+      const pathMap = new Map();
+      pathMap.set("", root);
+
+      data?.tree.forEach(item => {
+        const parts = item.path.split('/');
+        let currentPath = "";
+        let parent = root;
+
+        parts.forEach(part => {
+          const newPath = currentPath ? `${currentPath}/${part}` : part;
+          
+          if (!pathMap.has(newPath)) {
+            const newNode = {
+              name: part,
+              path: newPath,
+              type: item.type,
+              url: item.url,
+              size: item.size,
+              children: []
+            };
+            parent.children.push(newNode);
+            pathMap.set(newPath, newNode);
+          }
+
+          parent = pathMap.get(newPath);
+          currentPath = newPath;
+        });
+      });
+
+      return root;
+    };
+
+    // Create SVG
+    const svg = d3.select(treeRef.current)
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("class", "tree-svg");
+
+    // Add grid pattern
+    const defs = svg.append("defs");
+    defs.append("pattern")
+      .attr("id", "gridPattern")
+      .attr("width", 15)
+      .attr("height", 15)
+      .attr("patternUnits", "userSpaceOnUse")
+      .append("rect")
+      .attr("width", 15)
+      .attr("height", 15)
+      .attr("fill", "none")
+      .attr("stroke", "#eee")
+      .attr("stroke-width", 0.5);
+
+    // Add background with grid
+    svg.append("rect")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("fill", "url(#gridPattern)");
+
+    // Create main group for zoom
+    const g = svg.append("g")
+      .attr("class", "main-group")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Add zoom behavior
+    const zoom = d3.zoom()
+      .scaleExtent([0.5, 3])
+      .on("zoom", (event) => {
+        g.attr("transform", event.transform);
+      });
+
+    svg.call(zoom);
+
+    // Create tree layout
+    const treemap = d3.tree()
+      .size([width - margin.left - margin.right, height - margin.top - margin.bottom])
+      .separation((a, b) => (a.parent === b.parent ? 1.5 : 2.5));
+
+    // Create hierarchy
+    const hierarchicalData = processGitHubData(data);
+    const root = d3.hierarchy(hierarchicalData);
+
+    // Delete node function
+    const deleteNode = (nodeToDelete) => {
+      if (!nodeToDelete.parent) return; // Don't delete root
+
+      const parent = nodeToDelete.parent;
+      const index = parent.children.indexOf(nodeToDelete);
+      if (index > -1) {
+        parent.children.splice(index, 1);
+        if (parent.children.length === 0) {
+          parent.children = null;
+        }
+        // Remove deleted node and its descendants from nodePositions
+        const removeNodeAndDescendants = (node) => {
+          nodePositions.current.delete(node.data.path);
+          if (node.children) {
+            node.children.forEach(removeNodeAndDescendants);
+          }
+        };
+        removeNodeAndDescendants(nodeToDelete);
+        update();
+      }
+    };
+
+    // Diagonal generator
+    const diagonal = (source, target) => {
+      const sourceX = source.x;
+      const sourceY = source.y;
+      const targetX = target.x;
+      const targetY = target.y;
+      const midY = (sourceY + targetY) / 2;
+      
+      return `M ${sourceX} ${sourceY}
+              C ${sourceX} ${midY},
+                ${targetX} ${midY},
+                ${targetX} ${targetY}`;
+    };
+
+    // Update links function
+    const updateNodeLinks = (node) => {
+      g.selectAll(".link")
+        .filter(link => {
+          return link.source === node || 
+                 link.target === node ||
+                 isDescendant(node, link.source) ||
+                 isDescendant(node, link.target);
+        })
+        .attr("d", link => diagonal(link.source, link.target));
+    };
+
+    const isDescendant = (node1, node2) => {
+      let current = node2;
+      while (current.parent) {
+        if (current.parent === node1) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+
+    // Drag behavior
+    const drag = d3.drag()
+      .subject((event, d) => ({
+        x: d.x,
+        y: d.y
+      }))
+      .on("start", (event, d) => {
+        event.sourceEvent.stopPropagation();
+        if (event.sourceEvent.button !== 0) return;
+        
+        d.dragStartX = d.x;
+        d.dragStartY = d.y;
+        
+        d3.select(event.sourceEvent.target.closest(".node")).raise();
+      })
+      .on("drag", (event, d) => {
+        const dx = event.x - d.dragStartX;
+        const dy = event.y - d.dragStartY;
+        
+        const updatePositions = (node, deltaX, deltaY) => {
+          node.x = node.x0 + deltaX;
+          node.y = node.y0 + deltaY;
+          
+          d3.select(node.nodeElement)
+            .attr("transform", `translate(${node.x},${node.y})`);
+          
+          if (node.children) {
+            node.children.forEach(child => {
+              updatePositions(child, deltaX, deltaY);
+            });
+          }
+        };
+        
+        updatePositions(d, dx, dy);
+        updateNodeLinks(d);
+      })
+      .on("end", (event, d) => {
+        const updateStartPositions = (node) => {
+          node.x0 = node.x;
+          node.y0 = node.y;
+          // Store the custom position
+          nodePositions.current.set(node.data.path, { x: node.x, y: node.y });
+          if (node.children) {
+            node.children.forEach(updateStartPositions);
+          }
+        };
+        
+        updateStartPositions(d);
+      });
+
+    // Update function
+    const update = () => {
+      const treeData = treemap(root);
+      const nodes = treeData.descendants();
+      const links = treeData.links();
+
+      // Apply stored positions or calculate new ones
+      nodes.forEach(d => {
+        const storedPosition = nodePositions.current.get(d.data.path);
+        if (storedPosition) {
+          d.x = storedPosition.x;
+          d.y = storedPosition.y;
+        } else {
+          d.y = d.depth * 180;
+        }
+        d.x0 = d.x;
+        d.y0 = d.y;
+      });
+
+      const link = g.selectAll(".link")
+        .data(links)
+        .join("path")
+        .attr("class", "link")
+        .attr("d", d => diagonal(d.source, d.target))
+        .attr("stroke", "#666")
+        .attr("stroke-width", 1)
+        .attr("fill", "none");
+
+      const node = g.selectAll(".node")
+        .data(nodes)
+        .join("g")
+        .attr("class", "node")
+        .attr("transform", d => `translate(${d.x},${d.y})`);
+
+      nodes.forEach(d => {
+        d.nodeElement = node.filter(n => n === d).node();
+      });
+
+      // Add rectangles with increased width for delete button
+      node.selectAll("rect")
+        .data(d => [d])
+        .join("rect")
+        .attr("x", d => -(d.data.name.length * 4 + 20))
+        .attr("y", -15)
+        .attr("width", d => d.data.name.length * 8 + 40)
+        .attr("height", 30)
+        .attr("fill", "white")
+        .attr("stroke", "#333")
+        .attr("stroke-width", 1)
+        .attr("rx", 4)
+        .attr("cursor", "pointer")
+        .on("click", (event, d) => {
+          if (d.data?.url) {
+            setSelectedNode(d.data);
+          }
+        });
+
+      // Add main text
+      node.selectAll("text.main-text")
+        .data(d => [d])
+        .join("text")
+        .attr("class", "main-text")
+        .attr("dy", "0.3em")
+        .attr("text-anchor", "middle")
+        .attr("font-size", "12px")
+        .attr("fill", "#0d5497")
+        .text(d => d.data.name);
+
+      // Add delete button
+      const deleteButton = node.selectAll("g.delete-button")
+        .data(d => [d])
+        .join("g")
+        .attr("class", "delete-button")
+        .attr("transform", d => `translate(${d.data.name.length * 4 + 5}, -10)`)
+        .style("cursor", "pointer")
+        .style("opacity", 0)
+        .on("dblclick", (event, d) => {
+          event.stopPropagation();
+          if (d.depth !== 0) {
+            deleteNode(d);
+          }
+        });
+
+      // Delete button circle
+      deleteButton.append("circle")
+        .attr("r", 8)
+        .attr("fill", "#ff4444");
+
+      // Delete button X symbol
+      deleteButton.append("text")
+        .attr("dy", "0.3em")
+        .attr("text-anchor", "middle")
+        .attr("fill", "white")
+        .attr("font-size", "12px")
+        .text("×");
+
+      // Show/hide delete button on hover
+      node
+        .on("mouseenter", function() {
+          d3.select(this).select(".delete-button")
+            .transition()
+            .duration(200)
+            .style("opacity", 1);
+        })
+        .on("mouseleave", function() {
+          d3.select(this).select(".delete-button")
+            .transition()
+            .duration(200)
+            .style("opacity", 0);
+        });
+
+      node.call(drag);
+    };
+
+    update();
+
+    const handleResize = () => {
+      const newWidth = window.innerWidth;
+      const newHeight = window.innerHeight;
+      
+      svg
+        .attr("width", newWidth)
+        .attr("height", newHeight);
+        
+      treemap.size([
+        newWidth - margin.left - margin.right,
+        newHeight - margin.top - margin.bottom
+      ]);
+      
+      update();
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [data]);
+
+  return (
+    loading ? <FunnyLoader/> :
+    <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
+      <div ref={treeRef} style={{ width: '100%', height: '100%' }} />
+      {selectedNode && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '20px',
+            right: '20px',
+            background: 'white',
+            padding: '15px',
+            borderRadius: '8px',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+            maxWidth: '300px'
+          }}
+        >
+          <h3>{selectedNode.name}</h3>
+          <p>Type: {selectedNode.type === "blob" ? "file" : "folder"}</p>
+          {selectedNode.size && <p>Size: {selectedNode.size} bytes</p>}
+          <button
+            onClick={() => setSelectedNode(null)}
+            style={{
+              marginTop: '10px',
+              padding: '5px 10px',
+              borderRadius: '4px',
+              border: 'none',
+              background: '#0d5497',
+              color: 'white',
+              cursor: 'pointer'
+            }}
+          >
+            Close
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default TreeVisualization;

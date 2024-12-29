@@ -1,0 +1,406 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as d3 from 'd3';
+import './TreeVisualization.css'
+
+import { useParams } from 'react-router-dom';
+import FunnyLoader from './loader';
+
+
+
+const TreeVisualization = () => {
+  const treeRef = useRef(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+
+  const {owner , repo , branch } = useParams()
+  const [data , setData] = useState(null )
+  const  [ loading , setLoading ] = useState(true )
+console.log("ppppp");
+
+
+ 
+
+  const fetchData = async () => {
+    console.log("tryinggg");
+   
+  
+    try {
+
+      
+      const baseUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+      console.log(baseUrl);
+      
+      const headers = {
+        'Accept': 'application/vnd.github.v3+json'
+      };
+  
+      // Make the API call using the baseUrl and headers
+      const response = await fetch(baseUrl, { headers });
+      
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+  
+      const result = await response.json();
+      console.log({"tree" : result.tree});
+      
+      setData({"tree" : result.tree });  // Set the fetched data
+      setLoading(false)
+      console.log("doneeee");
+      
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } 
+  };
+  
+
+
+  useEffect(()=>{
+
+
+  fetchData()
+
+
+  } ,[] )
+
+
+  useEffect(() => {
+    if ( !treeRef.current) return;
+      console.log(11111111);
+      
+  console.log(data , "mmmm");
+    
+    
+    // Clear existing SVG
+    d3.select(treeRef.current).selectAll("*").remove();
+
+    // Set dimensions
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const margin = { top: 60, right: 120, bottom: 60, left: 120 };
+
+    // Process data function
+    const processGitHubData = (data) => {
+      const root = {
+        name: repo ,
+        children: []
+      };
+
+      const pathMap = new Map();
+      pathMap.set("", root);
+
+      data?.tree.forEach(item => {
+        const parts = item.path.split('/');
+        let currentPath = "";
+        let parent = root;
+
+        parts.forEach(part => {
+          const newPath = currentPath ? `${currentPath}/${part}` : part;
+          
+          if (!pathMap.has(newPath)) {
+            const newNode = {
+              name: part,
+              path: newPath,
+              type: item.type,
+              url: item.url,
+              size: item.size,
+              children: []
+            };
+            parent.children.push(newNode);
+            pathMap.set(newPath, newNode);
+          }
+
+          parent = pathMap.get(newPath);
+          currentPath = newPath;
+        });
+      });
+
+      return root;
+    };
+
+    // Create SVG
+    const svg = d3.select(treeRef.current)
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("class", "tree-svg");
+
+    // Add grid pattern
+    const defs = svg.append("defs");
+    defs.append("pattern")
+      .attr("id", "gridPattern")
+      .attr("width", 15)
+      .attr("height", 15)
+      .attr("patternUnits", "userSpaceOnUse")
+      .append("rect")
+      .attr("width", 15)
+      .attr("height", 15)
+      .attr("fill", "none")
+      .attr("stroke", "#eee")
+      .attr("stroke-width", 0.5);
+
+    // Add background with grid
+    svg.append("rect")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("fill", "url(#gridPattern)");
+
+    // Create main group for zoom
+    const g = svg.append("g")
+      .attr("class", "main-group")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Add zoom behavior
+    const zoom = d3.zoom()
+      .scaleExtent([0.5, 3])
+      .on("zoom", (event) => {
+        g.attr("transform", event.transform);
+      });
+
+    svg.call(zoom);
+
+    // Create tree layout
+    const treemap = d3.tree()
+      .size([width - margin.left - margin.right, height - margin.top - margin.bottom])
+      .separation((a, b) => (a.parent === b.parent ? 1.5 : 2.5));
+
+    // Create hierarchy
+    const hierarchicalData = processGitHubData(data);
+    const root = d3.hierarchy(hierarchicalData);
+
+    // Improved diagonal generator for smoother links
+    const diagonal = (source, target) => {
+      const sourceX = source.x;
+      const sourceY = source.y;
+      const targetX = target.x;
+      const targetY = target.y;
+
+      // Calculate control points for the curve
+      const midY = (sourceY + targetY) / 2;
+      
+      return `M ${sourceX} ${sourceY}
+              C ${sourceX} ${midY},
+                ${targetX} ${midY},
+                ${targetX} ${targetY}`;
+    };
+
+    // Function to update links for a node and all its descendants
+    const updateNodeLinks = (node) => {
+      g.selectAll(".link")
+        .filter(link => {
+          return link.source === node || 
+                 link.target === node ||
+                 isDescendant(node, link.source) ||
+                 isDescendant(node, link.target);
+        })
+        .attr("d", link => diagonal(link.source, link.target));
+    };
+
+    // Helper function to check if a node is a descendant of another node
+    const isDescendant = (node1, node2) => {
+      let current = node2;
+      while (current.parent) {
+        if (current.parent === node1) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+
+    // Improved drag behavior with link maintenance
+    const drag = d3.drag()
+      .subject((event, d) => ({
+        x: d.x,
+        y: d.y
+      }))
+      .on("start", (event, d) => {
+        event.sourceEvent.stopPropagation();
+        if (event.sourceEvent.button !== 0) return; // Only process left mouse button
+        
+        // Store original position
+        d.dragStartX = d.x;
+        d.dragStartY = d.y;
+        
+        // Raise the dragged node group
+        d3.select(event.sourceEvent.target.closest(".node")).raise();
+      })
+      .on("drag", (event, d) => {
+        // Calculate new position
+        const dx = event.x - d.dragStartX;
+        const dy = event.y - d.dragStartY;
+        
+        // Update positions for the node and all its descendants
+        const updatePositions = (node, deltaX, deltaY) => {
+          node.x = node.x0 + deltaX;
+          node.y = node.y0 + deltaY;
+          
+          // Update visual position
+          d3.select(node.nodeElement)
+            .attr("transform", `translate(${node.x},${node.y})`);
+          
+          // Recursively update children
+          if (node.children) {
+            node.children.forEach(child => {
+              updatePositions(child, deltaX, deltaY);
+            });
+          }
+        };
+        
+        // Update node and its descendants
+        updatePositions(d, dx, dy);
+        
+        // Update all affected links
+        updateNodeLinks(d);
+      })
+      .on("end", (event, d) => {
+        // Store new positions as starting positions for next drag
+        const updateStartPositions = (node) => {
+          node.x0 = node.x;
+          node.y0 = node.y;
+          if (node.children) {
+            node.children.forEach(updateStartPositions);
+          }
+        };
+        
+        updateStartPositions(d);
+      });
+
+    // Update function with improved link handling
+    const update = () => {
+      const treeData = treemap(root);
+      const nodes = treeData.descendants();
+      const links = treeData.links();
+
+      // Initialize positions
+      nodes.forEach(d => {
+        d.y = d.depth * 180;
+        d.x0 = d.x;
+        d.y0 = d.y;
+      });
+
+      // Update links
+      const link = g.selectAll(".link")
+        .data(links)
+        .join("path")
+        .attr("class", "link")
+        .attr("d", d => diagonal(d.source, d.target))
+        .attr("stroke", "#666")
+        .attr("stroke-width", 1)
+        .attr("fill", "none");
+
+      // Update nodes
+      const node = g.selectAll(".node")
+        .data(nodes)
+        .join("g")
+        .attr("class", "node")
+        .attr("transform", d => `translate(${d.x},${d.y})`);
+
+      // Store node element reference
+      nodes.forEach(d => {
+        d.nodeElement = node.filter(n => n === d).node();
+      });
+
+      // Add rectangles
+      node.selectAll("rect")
+        .data(d => [d])
+        .join("rect")
+        .attr("x", d => -(d.data?.name.length * 4 + 10))
+        .attr("y", -15)
+        .attr("width", d => d.data?.name.length * 8 + 20)
+        .attr("height", 30)
+        .attr("fill", "white")
+        .attr("stroke", "#333")
+        .attr("stroke-width", 1)
+        .attr("rx", 4)
+        .attr("cursor", "pointer")
+        .on("click", (event, d) => {
+          if (d.data?.url) {
+            setSelectedNode(d.data);
+          }
+        });
+
+      // Add text
+      node.selectAll("text")
+        .data(d => [d])
+        .join("text")
+        .attr("dy", "0.3em")
+        .attr("text-anchor", "middle")
+        .attr("font-size", "12px")
+        .attr("fill", "#0d5497")
+        .text(d => d.data?.name);
+
+      // Apply drag behavior
+      node.call(drag);
+    };
+
+    // Initialize
+    update();
+
+    // Handle window resize
+    const handleResize = () => {
+      const newWidth = window.innerWidth;
+      const newHeight = window.innerHeight;
+      
+      svg
+        .attr("width", newWidth)
+        .attr("height", newHeight);
+        
+      treemap.size([
+        newWidth - margin.left - margin.right,
+        newHeight - margin.top - margin.bottom
+      ]);
+      
+      update();
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [data]);
+
+
+
+  return (
+
+
+
+    loading ? < FunnyLoader/>:
+    <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
+      <div ref={treeRef} style={{ width: '100%', height: '100%' }} />
+      {selectedNode && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '20px',
+            right: '20px',
+            background: 'white',
+            padding: '15px',
+            borderRadius: '8px',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+            maxWidth: '300px'
+          }}
+        >
+          <h3>{selectedNode.name}</h3>
+          <p>Type: {selectedNode.type == "blob" ? "file" : "folder"}</p>
+          {selectedNode.size && <p>Size: {selectedNode.size} bytes</p>}
+          <button
+            onClick={() => setSelectedNode(null)}
+            style={{
+              marginTop: '10px',
+              padding: '5px 10px',
+              borderRadius: '4px',
+              border: 'none',
+              background: '#0d5497',
+              color: 'white',
+              cursor: 'pointer'
+            }}
+          >
+            Close
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default TreeVisualization;
