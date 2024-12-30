@@ -3,9 +3,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  base: '/',  // Add this to ensure proper base URL
   build: {
     rollupOptions: {
-      external: ['react-router-dom' , 'd3'],
+      external: ['d3'],  // Remove react-router-dom from external
     },
   },
 });

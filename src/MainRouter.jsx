@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom'; // Import Routes and Route components
+import { Routes, Route , BrowserRouter } from 'react-router-dom'; // Import Routes and Route components
 import Landing_page  from './Landing_page.jsx';
 import TreeVisualization from './TreeVisualization.jsx';
 
